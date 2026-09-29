@@ -188,3 +188,42 @@ export interface AiIntentResult {
   journey?: Journey;
   serviceIds?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Auth / RBAC (mock — see src/proxy.ts and /api/auth/*)
+// ---------------------------------------------------------------------------
+export type Role = "citizen" | "operator" | "officer" | "admin";
+
+export interface UserRecord {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: Role;
+  districtId: string | null;
+  preferredLanguage: Lang;
+  isActive: number; // 0/1
+  createdAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actorId: string;
+  actorRole: Role | "anonymous";
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: string; // JSON-encoded, small — never raw PII
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// API response envelope — used by every NEW route added after the initial
+// build (admin/*, health, auth/me, life-events, services, notifications,
+// government/copilot, ai/intent). Routes that already shipped and that the
+// frontend depends on keep their original flat shapes — see README for the
+// documented exception list.
+// ---------------------------------------------------------------------------
+export type ApiOk<T> = { success: true; data: T };
+export type ApiErr = { success: false; error: { code: string; message: string } };
+export type ApiResult<T> = ApiOk<T> | ApiErr;

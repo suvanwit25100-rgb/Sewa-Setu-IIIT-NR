@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { createApplication, listApplications } from "@/lib/db";
-import { getCitizen } from "@/lib/db";
-import type { Channel } from "@/lib/types";
+import { createApplication, listApplications, getCitizen, createNotification, logAudit } from "@/lib/db";
+import { getSession } from "@/lib/auth";
+import { CreateApplicationSchema, parseBody } from "@/lib/validation";
+import { service } from "@/lib/reference";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,17 +13,29 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  const { serviceId, citizenId = "demo", channel = "web", assistedBy = null } = body as {
-    serviceId: string; citizenId?: string; channel?: Channel; assistedBy?: string | null;
-  };
-  if (!serviceId) return NextResponse.json({ error: "serviceId required" }, { status: 400 });
-  const citizen = getCitizen(citizenId);
+  const parsed = parseBody(CreateApplicationSchema, await req.json().catch(() => ({})));
+  if (!parsed.ok) return NextResponse.json({ error: parsed.issue }, { status: 422 });
+  const data = parsed.data;
+
+  const citizen = getCitizen(data.citizenId);
   if (!citizen) return NextResponse.json({ error: "citizen not found" }, { status: 404 });
+  if (!service(data.serviceId)) return NextResponse.json({ error: "service not found" }, { status: 404 });
+
   const app = createApplication({
-    serviceId, citizenId,
+    serviceId: data.serviceId, citizenId: data.citizenId,
     citizenName: citizen.name, districtId: citizen.districtId,
-    channel, assistedBy,
+    channel: data.channel, assistedBy: data.assistedBy,
   });
+
+  const svc = service(data.serviceId);
+  createNotification({
+    citizenId: citizen.id, applicationId: app.id, channel: "app", type: "APPLICATION_UPDATE",
+    message_en: `Application #${app.id} for ${svc.name_en} submitted and auto-verifying.`,
+    message_hi: `आवेदन #${app.id} (${svc.name_hi}) जमा हुआ, स्वतः सत्यापन जारी।`,
+  });
+
+  const session = await getSession();
+  logAudit({ actorId: session?.userId ?? citizen.id, actorRole: session?.role ?? "citizen", action: "application.submit", entityType: "application", entityId: app.id, metadata: { serviceId: data.serviceId, channel: data.channel } });
+
   return NextResponse.json({ application: app });
 }

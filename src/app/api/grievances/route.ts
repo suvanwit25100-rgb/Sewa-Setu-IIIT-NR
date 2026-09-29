@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { listGrievances, createGrievance } from "@/lib/db";
+import { listGrievances, createGrievance, logAudit } from "@/lib/db";
+import { getSession } from "@/lib/auth";
+import { CreateGrievanceSchema, parseBody } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,9 +15,15 @@ export async function GET(req: Request) {
 // separate grievance form from scratch — it is auto-prepared from the
 // application record. They only review + submit.
 export async function POST(req: Request) {
-  const { applicationId, description } = (await req.json()) as { applicationId: string; description?: string };
-  if (!applicationId) return NextResponse.json({ error: "applicationId required" }, { status: 400 });
-  const g = createGrievance(applicationId, description ?? "Application has exceeded its guaranteed SLA.");
+  const parsed = parseBody(CreateGrievanceSchema, await req.json().catch(() => ({})));
+  if (!parsed.ok) return NextResponse.json({ error: parsed.issue }, { status: 422 });
+  const data = parsed.data;
+
+  const g = createGrievance(data.applicationId, data.description ?? "Application has exceeded its guaranteed SLA.");
   if (!g) return NextResponse.json({ error: "application not found" }, { status: 404 });
+
+  const session = await getSession();
+  logAudit({ actorId: session?.userId ?? g.citizenId, actorRole: session?.role ?? "citizen", action: "grievance.create", entityType: "grievance", entityId: g.id, metadata: { applicationId: g.applicationId } });
+
   return NextResponse.json({ grievance: g });
 }

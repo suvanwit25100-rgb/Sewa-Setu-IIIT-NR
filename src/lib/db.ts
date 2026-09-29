@@ -1,14 +1,19 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
-import type { Application, AppStatus, Channel, CitizenProfile, Notification, CitizenDocument, DocType, Grievance } from "./types";
+import type {
+  Application, AppStatus, Channel, CitizenProfile, Notification, CitizenDocument,
+  DocType, Grievance, GrievanceStatus, UserRecord, Role, AuditLogEntry,
+} from "./types";
 import { SERVICES, DEPARTMENTS, DISTRICTS, service, dept } from "./reference";
 import { extractDocument, delayRisk, slaRisk } from "./ai";
 
 // ---------------------------------------------------------------------------
 // Connection (singleton across hot reloads)
 // ---------------------------------------------------------------------------
-const DATA_DIR = path.join(process.cwd(), "data");
+// Overridable so tests (and any future multi-environment setup) can point
+// at an isolated database instead of the dev server's own data/ directory.
+const DATA_DIR = process.env.SEWASETU_DB_DIR ?? path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "sewasetu.db");
 
 declare global {
@@ -25,9 +30,29 @@ function connect(): Database.Database {
   return db;
 }
 
+// Date.now() alone can collide when two records are created within the same
+// millisecond (common in tests, and possible under real concurrent load) —
+// this counter guarantees every id generated in this process is unique.
+let idCounter = 0;
+function genId(prefix: string): string {
+  idCounter = (idCounter + 1) % 1000;
+  return `${prefix}${Date.now().toString().slice(-8)}${idCounter.toString().padStart(3, "0")}`;
+}
+
 export function getDb(): Database.Database {
   if (!global.__sewasetu_db) global.__sewasetu_db = connect();
   return global.__sewasetu_db;
+}
+
+/** Wipes and re-seeds the database. Used by `npm run db:reset` / the seed
+ *  script — never called from request-handling code. */
+export function resetDatabase(): void {
+  if (global.__sewasetu_db) {
+    global.__sewasetu_db.close();
+    global.__sewasetu_db = undefined;
+  }
+  if (fs.existsSync(DATA_DIR)) fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  getDb();
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +73,8 @@ function migrate(db: Database.Database) {
     );
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY, applicationId TEXT, citizenId TEXT, channel TEXT,
-      message_en TEXT, message_hi TEXT, createdAt TEXT, read INTEGER
+      message_en TEXT, message_hi TEXT, createdAt TEXT, read INTEGER,
+      type TEXT NOT NULL DEFAULT 'SYSTEM'
     );
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY, citizenId TEXT, type TEXT, label_en TEXT, fileName TEXT,
@@ -62,7 +88,34 @@ function migrate(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS access_log (
       id TEXT PRIMARY KEY, citizenId TEXT, departmentId TEXT, field TEXT, accessedAt TEXT
     );
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, phone TEXT, role TEXT,
+      districtId TEXT, preferredLanguage TEXT, isActive INTEGER, createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY, actorId TEXT, actorRole TEXT, action TEXT,
+      entityType TEXT, entityId TEXT, metadata TEXT, createdAt TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_apps_citizen ON applications(citizenId);
+    CREATE INDEX IF NOT EXISTS idx_apps_service ON applications(serviceId);
+    CREATE INDEX IF NOT EXISTS idx_apps_district ON applications(districtId);
+    CREATE INDEX IF NOT EXISTS idx_apps_status ON applications(status);
+    CREATE INDEX IF NOT EXISTS idx_apps_submitted ON applications(submittedAt);
+    CREATE INDEX IF NOT EXISTS idx_docs_citizen ON documents(citizenId);
+    CREATE INDEX IF NOT EXISTS idx_griev_citizen ON grievances(citizenId);
+    CREATE INDEX IF NOT EXISTS idx_notif_citizen ON notifications(citizenId);
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actorId);
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(createdAt);
+    CREATE INDEX IF NOT EXISTS idx_citizens_district ON citizens(districtId);
   `);
+
+  // notifications.type was added after the table first shipped — backfill
+  // the column for any database created by an earlier version of the app.
+  const cols = db.prepare("PRAGMA table_info(notifications)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "type")) {
+    db.exec("ALTER TABLE notifications ADD COLUMN type TEXT NOT NULL DEFAULT 'SYSTEM'");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,9 +131,34 @@ function mulberry32(a: number) {
   };
 }
 
-const FIRST = ["Sunita", "Ramesh", "Phoolwati", "Dinesh", "Jamuna", "Santram", "Budhri", "Mahesh", "Sukhmati", "Rajkumar", "Kaushalya", "Bhupendra", "Lakshmi", "Chhannu", "Parvati", "Ganpat", "Itwari", "Somaru", "Devki", "Hariram"];
-const LAST = ["Netam", "Kashyap", "Baghel", "Sahu", "Markam", "Yadav", "Nag", "Dhurwa", "Verma", "Korram", "Sori", "Mandavi", "Dewangan", "Patel", "Uikey"];
+const FIRST = ["Sunita", "Ramesh", "Phoolwati", "Dinesh", "Jamuna", "Santram", "Budhri", "Mahesh", "Sukhmati", "Rajkumar", "Kaushalya", "Bhupendra", "Lakshmi", "Chhannu", "Parvati", "Ganpat", "Itwari", "Somaru", "Devki", "Hariram", "Anita", "Suresh", "Rekha", "Manoj", "Sarita", "Ajay", "Kiran", "Vinod", "Meena", "Ashok"];
+const LAST = ["Netam", "Kashyap", "Baghel", "Sahu", "Markam", "Yadav", "Nag", "Dhurwa", "Verma", "Korram", "Sori", "Mandavi", "Dewangan", "Patel", "Uikey", "Kunjam", "Oyam", "Vaishnav", "Gond", "Thakur"];
 const OPERATORS = ["CHOICE Op. Rekha", "CSC Op. Arjun", "Bank Sakhi Meena", "CSC Op. Dilip", "CHOICE Op. Farida"];
+const OCCUPATIONS: CitizenProfile["occupation"][] = ["farmer", "labour", "self_employed", "salaried", "student", "unemployed"];
+const CATEGORIES: CitizenProfile["category"][] = ["general", "obc", "sc", "st"];
+
+/** Builds one synthetic (never real) citizen profile, biased so tribal/LWE
+ *  districts skew ST/forest-dweller and plains districts skew general/OBC —
+ *  mirrors the real demographic pattern without using any real data. */
+function genCitizen(id: string, districtId: string, rnd: () => number, pick: <T>(a: T[]) => T): CitizenProfile {
+  const d = DISTRICTS.find((x) => x.id === districtId)!;
+  const category: CitizenProfile["category"] = d.region !== "plains" && rnd() < 0.55 ? "st" : pick(CATEGORIES);
+  const occupation = pick(OCCUPATIONS);
+  const age = 18 + Math.floor(rnd() * 58);
+  const isStudent = occupation === "student" || (age < 24 && rnd() < 0.3);
+  return {
+    id, name: `${pick(FIRST)} ${pick(LAST)}`,
+    aadhaarMasked: `XXXX XXXX ${1000 + Math.floor(rnd() * 8999)}`,
+    phone: `+91 9${Math.floor(1000000 + rnd() * 8999999)}`,
+    districtId, age, gender: rnd() < 0.5 ? "female" : "male", category,
+    annualIncome: Math.round(15000 + rnd() * 180000),
+    isBPL: rnd() < 0.5, isStudent, occupation,
+    hasDisability: rnd() < 0.06,
+    landHectares: occupation === "farmer" ? Math.round(rnd() * 3 * 10) / 10 : 0,
+    isForestDweller: category === "st" && d.region !== "plains" && rnd() < 0.6,
+    household: 1 + Math.floor(rnd() * 6),
+  };
+}
 
 function seed(db: Database.Database) {
   const count = (db.prepare("SELECT COUNT(*) c FROM citizens").get() as { c: number }).c;
@@ -92,36 +170,60 @@ function seed(db: Database.Database) {
 
   const insCit = db.prepare(`INSERT INTO citizens VALUES (@id,@name,@aadhaarMasked,@phone,@districtId,@age,@gender,@category,@annualIncome,@isBPL,@isStudent,@occupation,@hasDisability,@landHectares,@isForestDweller,@household)`);
 
-  // The demo citizen — deliberately rich so the eligibility engine lights up.
+  // The two "principal" demo citizens — deliberately rich so the eligibility
+  // engine and the citizen-side UI (hardcoded to citizenId "demo") light up.
   const demo: CitizenProfile = {
     id: "demo", name: "Sukhmati Kashyap", aadhaarMasked: "XXXX XXXX 4821", phone: "+91 94255 1xxxx",
     districtId: "bastar", age: 63, gender: "female", category: "st", annualIncome: 42000,
     isBPL: true, isStudent: false, occupation: "farmer", hasDisability: false,
     landHectares: 0.4, isForestDweller: true, household: 2,
   };
-  insCit.run(toRow(demo));
-
-  // A student demo citizen too (nice for a second persona if needed).
   const student: CitizenProfile = {
     id: "cit_student", name: "Dinesh Markam", aadhaarMasked: "XXXX XXXX 7733", phone: "+91 90985 2xxxx",
     districtId: "kanker", age: 19, gender: "male", category: "st", annualIncome: 68000,
     isBPL: true, isStudent: true, occupation: "student", hasDisability: false,
     landHectares: 0, isForestDweller: false, household: 5,
   };
+  insCit.run(toRow(demo));
   insCit.run(toRow(student));
+
+  // ~58 more synthetic citizens: 2 guaranteed per district, the rest spread
+  // by population weight — so every district has real, inspectable records
+  // for the admin portal, and the bulk application seed below can reference
+  // real citizens instead of orphan ids.
+  const generated: CitizenProfile[] = [];
+  let gi = 0;
+  for (const d of DISTRICTS) {
+    for (let k = 0; k < 2; k++) generated.push(genCitizen(`cit_gen_${gi++}`, d.id, rnd, pick));
+  }
+  const totalPop = DISTRICTS.reduce((s, d) => s + d.population, 0);
+  while (generated.length < 60) {
+    let r = rnd() * totalPop;
+    let chosen = DISTRICTS[0];
+    for (const d of DISTRICTS) { r -= d.population; if (r <= 0) { chosen = d; break; } }
+    generated.push(genCitizen(`cit_gen_${gi++}`, chosen.id, rnd, pick));
+  }
+  for (const c of generated) insCit.run(toRow(c));
+
+  const citizenPool = [demo, student, ...generated];
+  const byDistrict = new Map<string, CitizenProfile[]>();
+  for (const c of citizenPool) byDistrict.set(c.districtId, [...(byDistrict.get(c.districtId) ?? []), c]);
 
   const insApp = db.prepare(`INSERT INTO applications VALUES (@id,@serviceId,@citizenId,@citizenName,@districtId,@status,@channel,@assistedBy,@submittedAt,@slaDays,@dueAt,@updatedAt,@autoVerified)`);
 
   const rows: Application[] = [];
   let n = 0;
 
-  // Bulk realistic applications across the state for the MIS.
+  // Bulk realistic applications across the state for the MIS — each one now
+  // references a REAL citizen row (not an orphan id), so the admin portal's
+  // citizen drill-down actually has applications to show.
   for (const d of DISTRICTS) {
-    // Volume scales with population; plains produce more digital applications.
     const base = Math.round((d.population / 100) * (0.5 + d.digitalReadiness / 100));
     const volume = Math.max(6, Math.min(34, base));
+    const pool = byDistrict.get(d.id) ?? [demo];
     for (let i = 0; i < volume; i++) {
       const svc = weightedService(rnd);
+      const citizen = pick(pool);
       const ageDays = Math.floor(rnd() * 90);
       const submittedAt = new Date(now - ageDays * 864e5);
       const dueAt = new Date(submittedAt.getTime() + svc.slaDays * 864e5);
@@ -130,8 +232,8 @@ function seed(db: Database.Database) {
       rows.push({
         id: `A${(1000 + n++).toString()}`,
         serviceId: svc.id,
-        citizenId: `cit_${n}`,
-        citizenName: `${pick(FIRST)} ${pick(LAST)}`,
+        citizenId: citizen.id,
+        citizenName: citizen.name,
         districtId: d.id,
         status,
         channel,
@@ -170,10 +272,10 @@ function seed(db: Database.Database) {
   insMany(rows);
 
   // Notifications for the demo citizen.
-  const insNote = db.prepare(`INSERT INTO notifications VALUES (@id,@applicationId,@citizenId,@channel,@message_en,@message_hi,@createdAt,@read)`);
-  const notes: Notification[] = [
-    { id: "N1", applicationId: "", citizenId: "demo", channel: "whatsapp", message_en: "Your Caste Certificate is issued. Download on WhatsApp.", message_hi: "आपका जाति प्रमाण पत्र जारी हुआ। व्हाट्सएप पर डाउनलोड करें।", createdAt: new Date(now - 2 * 864e5).toISOString(), read: 0 },
-    { id: "N2", applicationId: "", citizenId: "demo", channel: "sms", message_en: "Old Age Pension: documents auto-verified, in review.", message_hi: "वृद्धावस्था पेंशन: दस्तावेज़ सत्यापित, समीक्षा में।", createdAt: new Date(now - 5 * 864e5).toISOString(), read: 1 },
+  const insNote = db.prepare(`INSERT INTO notifications VALUES (@id,@applicationId,@citizenId,@channel,@message_en,@message_hi,@createdAt,@read,@type)`);
+  const notes: (Notification & { type: string })[] = [
+    { id: "N1", applicationId: "", citizenId: "demo", channel: "whatsapp", message_en: "Your Caste Certificate is issued. Download on WhatsApp.", message_hi: "आपका जाति प्रमाण पत्र जारी हुआ। व्हाट्सएप पर डाउनलोड करें।", createdAt: new Date(now - 2 * 864e5).toISOString(), read: 0, type: "APPLICATION_UPDATE" },
+    { id: "N2", applicationId: "", citizenId: "demo", channel: "sms", message_en: "Old Age Pension: documents auto-verified, in review.", message_hi: "वृद्धावस्था पेंशन: दस्तावेज़ सत्यापित, समीक्षा में।", createdAt: new Date(now - 5 * 864e5).toISOString(), read: 1, type: "APPLICATION_UPDATE" },
   ];
   for (const nt of notes) insNote.run(nt as unknown as Record<string, unknown>);
 
@@ -205,6 +307,18 @@ function seed(db: Database.Database) {
   for (const [d2, field, ageDays] of accesses) {
     insAccess.run({ id: `AC${(1 + an++).toString()}`, citizenId: "demo", departmentId: d2, field, accessedAt: new Date(now - ageDays * 864e5).toISOString() });
   }
+
+  // Canonical demo login accounts (see README "Demo accounts"). The citizen
+  // account's id is "demo" on purpose — it IS the citizens.demo row, so every
+  // existing citizenId:"demo" reference across the app keeps working.
+  const insUser = db.prepare(`INSERT INTO users VALUES (@id,@name,@email,@phone,@role,@districtId,@preferredLanguage,@isActive,@createdAt)`);
+  const users: UserRecord[] = [
+    { id: "demo", name: demo.name, email: "citizen@demo.com", phone: demo.phone, role: "citizen", districtId: demo.districtId, preferredLanguage: "hi", isActive: 1, createdAt: new Date(now - 200 * 864e5).toISOString() },
+    { id: "u_operator_demo", name: "Rekha (CHOICE Operator)", email: "operator@demo.com", phone: "+91 90000 00001", role: "operator", districtId: "bastar", preferredLanguage: "hi", isActive: 1, createdAt: new Date(now - 300 * 864e5).toISOString() },
+    { id: "u_officer_demo", name: "Revenue Officer", email: "officer@demo.com", phone: "+91 90000 00002", role: "officer", districtId: null, preferredLanguage: "en", isActive: 1, createdAt: new Date(now - 300 * 864e5).toISOString() },
+    { id: "u_admin_demo", name: "System Admin", email: "admin@demo.com", phone: "+91 90000 00003", role: "admin", districtId: null, preferredLanguage: "en", isActive: 1, createdAt: new Date(now - 300 * 864e5).toISOString() },
+  ];
+  for (const u of users) insUser.run(u);
 }
 
 function weightedService(rnd: () => number) {
@@ -254,13 +368,44 @@ function fromRow(r: Record<string, unknown>): CitizenProfile {
 }
 
 // ---------------------------------------------------------------------------
-// Queries
+// Citizens
 // ---------------------------------------------------------------------------
 export function getCitizen(id: string): CitizenProfile | null {
   const r = getDb().prepare("SELECT * FROM citizens WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   return r ? fromRow(r) : null;
 }
 
+export function listCitizens(opts: { search?: string; districtId?: string; page?: number; limit?: number } = {}): { rows: CitizenProfile[]; total: number } {
+  const db = getDb();
+  const limit = Math.min(100, opts.limit ?? 20);
+  const page = Math.max(1, opts.page ?? 1);
+  const where: string[] = [];
+  const params: Record<string, unknown> = {};
+  if (opts.search) { where.push("(name LIKE @q OR id LIKE @q)"); params.q = `%${opts.search}%`; }
+  if (opts.districtId) { where.push("districtId = @districtId"); params.districtId = opts.districtId; }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const total = (db.prepare(`SELECT COUNT(*) c FROM citizens ${clause}`).get(params) as { c: number }).c;
+  const rows = db.prepare(`SELECT * FROM citizens ${clause} ORDER BY name LIMIT @limit OFFSET @offset`)
+    .all({ ...params, limit, offset: (page - 1) * limit }) as Record<string, unknown>[];
+  return { rows: rows.map(fromRow), total };
+}
+
+/** Everything the admin portal needs to "inspect" one citizen's data. */
+export function getCitizenDetail(id: string) {
+  const citizen = getCitizen(id);
+  if (!citizen) return null;
+  return {
+    citizen,
+    applications: listApplications(id),
+    documents: listDocuments(id),
+    grievances: listGrievances(id),
+    notifications: listNotifications(id),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Applications
+// ---------------------------------------------------------------------------
 export function listApplications(citizenId?: string): Application[] {
   const db = getDb();
   const rows = citizenId
@@ -280,7 +425,7 @@ export function createApplication(input: {
   const svc = service(input.serviceId);
   const now = new Date();
   const app: Application = {
-    id: `A${Date.now().toString().slice(-6)}`,
+    id: genId("A"),
     serviceId: input.serviceId, citizenId: input.citizenId, citizenName: input.citizenName,
     districtId: input.districtId, status: "auto_verifying", channel: input.channel,
     assistedBy: input.assistedBy, submittedAt: now.toISOString(), slaDays: svc.slaDays,
@@ -296,16 +441,76 @@ const NEXT: Record<AppStatus, AppStatus> = {
   approved: "delivered", delivered: "delivered", rejected: "rejected",
 };
 
-export function advanceApplication(id: string): Application | null {
-  const app = getApplication(id);
-  if (!app) return null;
-  const next = NEXT[app.status];
-  getDb().prepare("UPDATE applications SET status = ?, updatedAt = ? WHERE id = ?").run(next, new Date().toISOString(), id);
+const TERMINAL: AppStatus[] = ["delivered", "rejected"];
+export const canTransition = (app: Application): boolean => !TERMINAL.includes(app.status);
+
+// approve()/reject() are decisions, not workflow steps — once an application
+// has been approved, delivered, or rejected, neither can fire again. This is
+// a stricter guard than canTransition() (which the generic step-advancer
+// uses, since "approved" must still be allowed to advance on to "delivered").
+const ALREADY_DECIDED: AppStatus[] = ["approved", "delivered", "rejected"];
+
+function setStatus(id: string, status: AppStatus): Application | null {
+  getDb().prepare("UPDATE applications SET status = ?, updatedAt = ? WHERE id = ?").run(status, new Date().toISOString(), id);
   return getApplication(id);
 }
 
+/** Advances one step through the workflow. No-op (returns the app
+ *  unchanged) once an application has reached a terminal state. */
+export function advanceApplication(id: string): Application | null {
+  const app = getApplication(id);
+  if (!app) return null;
+  if (!canTransition(app)) return app;
+  return setStatus(id, NEXT[app.status]);
+}
+
+export function approveApplication(id: string): { app: Application | null; error?: string } {
+  const app = getApplication(id);
+  if (!app) return { app: null, error: "not_found" };
+  if (ALREADY_DECIDED.includes(app.status)) return { app, error: "already_terminal" };
+  return { app: setStatus(id, "approved") };
+}
+
+export function rejectApplication(id: string, _reason?: string): { app: Application | null; error?: string } {
+  const app = getApplication(id);
+  if (!app) return { app: null, error: "not_found" };
+  if (ALREADY_DECIDED.includes(app.status)) return { app, error: "already_terminal" };
+  return { app: setStatus(id, "rejected") };
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+export type NotificationType =
+  | "APPLICATION_UPDATE" | "SLA_WARNING" | "SLA_EXCEEDED" | "DOCUMENT_REQUIRED"
+  | "ELIGIBILITY_DISCOVERY" | "GRIEVANCE_UPDATE" | "SYSTEM";
+
 export function listNotifications(citizenId: string): Notification[] {
   return getDb().prepare("SELECT * FROM notifications WHERE citizenId = ? ORDER BY createdAt DESC").all(citizenId) as Notification[];
+}
+
+export function createNotification(input: {
+  citizenId: string; applicationId?: string; channel: "whatsapp" | "sms" | "app";
+  type: NotificationType; message_en: string; message_hi: string;
+}): Notification {
+  const n = {
+    id: `N${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 100)}`,
+    applicationId: input.applicationId ?? "", citizenId: input.citizenId, channel: input.channel,
+    message_en: input.message_en, message_hi: input.message_hi,
+    createdAt: new Date().toISOString(), read: 0, type: input.type,
+  };
+  getDb().prepare(`INSERT INTO notifications VALUES (@id,@applicationId,@citizenId,@channel,@message_en,@message_hi,@createdAt,@read,@type)`).run(n);
+  return n as unknown as Notification;
+}
+
+export function markNotificationRead(id: string): boolean {
+  const r = getDb().prepare("UPDATE notifications SET read = 1 WHERE id = ?").run(id);
+  return r.changes > 0;
+}
+
+export function markAllNotificationsRead(citizenId: string): number {
+  const r = getDb().prepare("UPDATE notifications SET read = 1 WHERE citizenId = ?").run(citizenId);
+  return r.changes;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +524,7 @@ export function listDocuments(citizenId: string): CitizenDocument[] {
 export function createDocument(citizenId: string, fileName: string): CitizenDocument {
   const ext = extractDocument(fileName);
   const doc: CitizenDocument = {
-    id: `D${Date.now().toString().slice(-7)}`, citizenId, type: ext.type, label_en: ext.label_en,
+    id: genId("D"), citizenId, type: ext.type, label_en: ext.label_en,
     fileName, fields: ext.fields, uploadedAt: new Date().toISOString(), verified: 1,
   };
   getDb().prepare(`INSERT INTO documents VALUES (@id,@citizenId,@type,@label_en,@fileName,@fields,@uploadedAt,@verified)`)
@@ -337,18 +542,38 @@ export function listGrievances(citizenId?: string): Grievance[] {
     : db.prepare("SELECT * FROM grievances ORDER BY createdAt DESC").all()) as Grievance[];
 }
 
+export function getGrievance(id: string): Grievance | null {
+  return (getDb().prepare("SELECT * FROM grievances WHERE id = ?").get(id) as Grievance) ?? null;
+}
+
 export function createGrievance(applicationId: string, description: string): Grievance | null {
   const app = getApplication(applicationId);
   if (!app) return null;
   const svc = service(app.serviceId);
   const delayDays = Math.max(0, Math.ceil((Date.now() - new Date(app.dueAt).getTime()) / 864e5));
   const g: Grievance = {
-    id: `G${Date.now().toString().slice(-6)}`, applicationId, citizenId: app.citizenId,
+    id: genId("G"), applicationId, citizenId: app.citizenId,
     serviceName: svc.name_en, departmentId: svc.departmentId, submittedAt: app.submittedAt,
     slaDays: app.slaDays, delayDays, description, status: "open", createdAt: new Date().toISOString(),
   };
   getDb().prepare(`INSERT INTO grievances VALUES (@id,@applicationId,@citizenId,@serviceName,@departmentId,@submittedAt,@slaDays,@delayDays,@description,@status,@createdAt)`).run(g as unknown as Record<string, unknown>);
   return g;
+}
+
+const GRIEVANCE_TRANSITIONS: Record<GrievanceStatus, GrievanceStatus[]> = {
+  open: ["acknowledged", "resolved"],
+  acknowledged: ["resolved"],
+  resolved: [],
+};
+
+export function updateGrievanceStatus(id: string, status: GrievanceStatus): { grievance: Grievance | null; error?: string } {
+  const g = getGrievance(id);
+  if (!g) return { grievance: null, error: "not_found" };
+  if (g.status !== status && !GRIEVANCE_TRANSITIONS[g.status as GrievanceStatus].includes(status)) {
+    return { grievance: g, error: "invalid_transition" };
+  }
+  getDb().prepare("UPDATE grievances SET status = ? WHERE id = ?").run(status, id);
+  return { grievance: getGrievance(id) };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +582,88 @@ export function createGrievance(applicationId: string, description: string): Gri
 export interface AccessEntry { id: string; departmentId: string; field: string; accessedAt: string }
 export function listAccessLog(citizenId: string): AccessEntry[] {
   return getDb().prepare("SELECT id, departmentId, field, accessedAt FROM access_log WHERE citizenId = ? ORDER BY accessedAt DESC").all(citizenId) as AccessEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// Users (mock auth identities — see src/lib/auth.ts)
+// ---------------------------------------------------------------------------
+export function getUser(id: string): UserRecord | null {
+  return (getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRecord) ?? null;
+}
+
+export function getUserByEmail(email: string): UserRecord | null {
+  return (getDb().prepare("SELECT * FROM users WHERE email = ?").get(email) as UserRecord) ?? null;
+}
+
+export function listUsers(): UserRecord[] {
+  return getDb().prepare("SELECT * FROM users ORDER BY createdAt").all() as UserRecord[];
+}
+
+const CANONICAL_EMAIL: Record<Role, string> = {
+  citizen: "citizen@demo.com", operator: "operator@demo.com",
+  officer: "officer@demo.com", admin: "admin@demo.com",
+};
+
+/** Mock login has no password to check — it resolves to the one canonical
+ *  demo account for the chosen role (seeded above), creating it on the fly
+ *  if a fresh database somehow doesn't have it yet. */
+export function resolveDemoUser(role: Role): UserRecord {
+  const existing = getUserByEmail(CANONICAL_EMAIL[role]);
+  if (existing) return existing;
+  const id = role === "citizen" ? "demo" : `u_${role}_demo`;
+  const user: UserRecord = {
+    id, name: `${role[0].toUpperCase()}${role.slice(1)} (Demo)`, email: CANONICAL_EMAIL[role],
+    phone: "+91 90000 00000", role, districtId: null, preferredLanguage: "hi",
+    isActive: 1, createdAt: new Date().toISOString(),
+  };
+  getDb().prepare(`INSERT INTO users VALUES (@id,@name,@email,@phone,@role,@districtId,@preferredLanguage,@isActive,@createdAt)`).run(user);
+  return user;
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (Feature 39)
+// ---------------------------------------------------------------------------
+export function logAudit(entry: {
+  actorId: string; actorRole: Role | "anonymous"; action: string;
+  entityType: string; entityId: string; metadata?: Record<string, unknown>;
+}): void {
+  const row: AuditLogEntry = {
+    id: `AL${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 100)}`,
+    actorId: entry.actorId, actorRole: entry.actorRole, action: entry.action,
+    entityType: entry.entityType, entityId: entry.entityId,
+    metadata: JSON.stringify(entry.metadata ?? {}), createdAt: new Date().toISOString(),
+  };
+  getDb().prepare(`INSERT INTO audit_log VALUES (@id,@actorId,@actorRole,@action,@entityType,@entityId,@metadata,@createdAt)`).run(row);
+}
+
+export function listAuditLog(opts: { limit?: number; actorRole?: string; entityType?: string } = {}): AuditLogEntry[] {
+  const db = getDb();
+  const where: string[] = [];
+  const params: Record<string, unknown> = { limit: Math.min(500, opts.limit ?? 100) };
+  if (opts.actorRole) { where.push("actorRole = @actorRole"); params.actorRole = opts.actorRole; }
+  if (opts.entityType) { where.push("entityType = @entityType"); params.entityType = opts.entityType; }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return db.prepare(`SELECT * FROM audit_log ${clause} ORDER BY createdAt DESC LIMIT @limit`).all(params) as AuditLogEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// System / admin "backend page" stats
+// ---------------------------------------------------------------------------
+export function dbStats() {
+  const db = getDb();
+  const count = (t: string) => (db.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as { c: number }).c;
+  return {
+    tables: {
+      citizens: count("citizens"), applications: count("applications"),
+      documents: count("documents"), grievances: count("grievances"),
+      notifications: count("notifications"), users: count("users"),
+      auditLog: count("audit_log"), accessLog: count("access_log"),
+    },
+    catalog: { services: SERVICES.length, departments: DEPARTMENTS.length, districts: DISTRICTS.length },
+    dbPath: DB_PATH,
+    aiProvider: process.env.AI_PROVIDER ?? "mock",
+    environment: process.env.NODE_ENV ?? "development",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -534,3 +841,6 @@ export function computeGovernance(): GovernanceData {
     rootCause, insight_en, insight_hi, byDepartment, heatmap,
   };
 }
+
+// Re-exported so callers only need one import for the common risk helpers.
+export { delayRisk, slaRisk };

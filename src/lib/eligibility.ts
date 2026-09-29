@@ -120,3 +120,45 @@ export function computeEligibility(p: CitizenProfile): EligibilityHit[] {
   }
   return hits.sort((a, b) => (a.match === b.match ? 0 : a.match === "high" ? -1 : 1));
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/eligibility/services — the spec's exact contract: every
+// rule-bearing service, not just the ones the citizen fully qualifies for,
+// each with an explainable status. This never presents a match as an
+// official determination — wording stays "potentially eligible."
+// ---------------------------------------------------------------------------
+export type EligibilityStatus = "LIKELY" | "POSSIBLE" | "NOT_ELIGIBLE" | "MORE_INFORMATION_REQUIRED";
+
+export interface EligibilityAssessment {
+  serviceId: string;
+  serviceName: string;
+  eligibilityStatus: EligibilityStatus;
+  matchScore: number; // 0..1, derived from the fraction of rules satisfied
+  reasons: string[];
+  missingInformation: string[];
+}
+
+export function assessEligibility(p: CitizenProfile): EligibilityAssessment[] {
+  return SERVICES
+    .filter((svc) => svc.eligibilityRules.length > 0)
+    .map((svc) => {
+      const results = svc.eligibilityRules.map((rk) => ({ key: rk, rule: RULES[rk], met: RULES[rk]?.test(p) ?? false }));
+      const metCount = results.filter((r) => r.met).length;
+      const matchScore = Math.round((metCount / results.length) * 100) / 100;
+
+      let status: EligibilityStatus;
+      if (metCount === results.length) status = results.length >= 2 ? "LIKELY" : "POSSIBLE";
+      else if (metCount === 0) status = "NOT_ELIGIBLE";
+      else status = "MORE_INFORMATION_REQUIRED";
+
+      return {
+        serviceId: svc.id,
+        serviceName: svc.name_en,
+        eligibilityStatus: status,
+        matchScore,
+        reasons: results.filter((r) => r.met).map((r) => r.rule.reason_en),
+        missingInformation: results.filter((r) => !r.met).map((r) => r.rule.label_en),
+      };
+    })
+    .sort((a, b) => b.matchScore - a.matchScore);
+}

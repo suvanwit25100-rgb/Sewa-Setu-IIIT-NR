@@ -12,13 +12,16 @@ import {
 
 type Tab = "citizen" | "sewasetu" | "govt" | "admin";
 type Method = "password" | "otp";
+type Role = "citizen" | "officer" | "admin";
 
-const TABS: { id: Tab; hi: string; en: string; role: "citizen" | "officer" }[] = [
+const TABS: { id: Tab; hi: string; en: string; role: Role }[] = [
   { id: "citizen", hi: "नागरिक लॉगिन", en: "Citizen Login", role: "citizen" },
   { id: "sewasetu", hi: "सेवा सेतु लॉगिन", en: "Sewa Setu Login", role: "citizen" },
   { id: "govt", hi: "शासकीय", en: "Government", role: "officer" },
-  { id: "admin", hi: "एडमिन लॉगिन", en: "Admin Login", role: "officer" },
+  { id: "admin", hi: "एडमिन लॉगिन", en: "Admin Login", role: "admin" },
 ];
+
+const HOME_FOR: Record<Role, string> = { citizen: "/citizen", officer: "/mis", admin: "/admin" };
 
 const FOCUS = [
   { icon: Sparkles, hi: "सक्रिय एवं व्यक्तिगत सेवाएं", en: "Proactive & personalized", desc_hi: "पात्रता इंजन उन लाभों को दिखाता है जो आपने कभी नहीं लिए।", desc_en: "Eligibility engine surfaces benefits you never claimed." },
@@ -52,12 +55,12 @@ function LoginLanding() {
 
   const activeTab = TABS.find((t) => t.id === tab)!;
 
-  const login = async (role: "citizen" | "officer", method_: string) => {
+  const login = async (role: Role, method_: string) => {
     setBusy(true);
     setNote(null);
     await fetch("/api/auth/login", { method: "POST", body: JSON.stringify({ role }) });
     setBusy(false);
-    const dest = nextPath && nextPath.startsWith("/") ? nextPath : role === "citizen" ? "/citizen" : "/mis";
+    const dest = nextPath && nextPath.startsWith("/") ? nextPath : HOME_FOR[role];
     router.push(dest);
   };
 

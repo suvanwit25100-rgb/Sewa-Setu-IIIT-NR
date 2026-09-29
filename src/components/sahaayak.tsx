@@ -24,7 +24,7 @@ export function Sahaayak() {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
 
-  if (path.startsWith("/mis") || path === "/") return null;
+  if (path.startsWith("/mis") || path.startsWith("/admin") || path === "/") return null;
 
   const send = async (text: string) => {
     const q = text.trim();

@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "./providers";
 import { GT_LANGUAGES } from "./google-translate";
 import { t } from "@/lib/i18n";
 import type { Lang } from "@/lib/types";
-import { Landmark, HandHelping, BarChart3, User, Sun, Moon, Languages, ChevronDown, TriangleAlert, LogOut } from "lucide-react";
+import { Landmark, HandHelping, BarChart3, User, Sun, Moon, Languages, ChevronDown, TriangleAlert, LogOut, ShieldCheck } from "lucide-react";
 
 const MANUAL: { code: Lang; label: string }[] = [
   { code: "en", label: "English" },
@@ -20,7 +20,13 @@ export function TopBar() {
   const path = usePathname();
   const router = useRouter();
   const isOfficer = path.startsWith("/mis");
+  const isAdmin = path.startsWith("/admin");
   const [langOpen, setLangOpen] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me").then((r) => r.json()).then((d) => { if (d.success) setRole(d.data.role); }).catch(() => {});
+  }, [path]);
 
   // The login/landing page renders its own official-look-alike header.
   if (path === "/") return null;
@@ -72,6 +78,11 @@ export function TopBar() {
               <Link href="/mis" className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold ${isOfficer ? "bg-brand text-white" : "text-muted"}`}>
                 <BarChart3 size={14} /> {t("officerPortal", lang)}
               </Link>
+              {role === "admin" && (
+                <Link href="/admin" className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold ${isAdmin ? "bg-brand text-white" : "text-muted"}`}>
+                  <ShieldCheck size={14} /> Admin
+                </Link>
+              )}
             </nav>
 
             {/* Language: manual dict (en/hi/cg) + Google full-page MT for everything else */}
@@ -170,7 +181,7 @@ export function TopBar() {
         </div>
       )}
 
-      {!isOfficer && <CitizenSubNav path={path} lang={lang} />}
+      {!isOfficer && !isAdmin && <CitizenSubNav path={path} lang={lang} />}
     </header>
   );
 }
@@ -185,7 +196,7 @@ const CITIZEN_LINKS = (lang: Lang) => [
 ];
 
 function CitizenSubNav({ path, lang }: { path: string; lang: Lang }) {
-  if (path === "/" || path.startsWith("/mis")) return null;
+  if (path === "/" || path.startsWith("/mis") || path.startsWith("/admin")) return null;
   const links = CITIZEN_LINKS(lang);
   return (
     <div className="border-b bg-surface">
