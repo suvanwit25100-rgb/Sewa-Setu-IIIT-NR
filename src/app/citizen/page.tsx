@@ -2,13 +2,20 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useApp } from "@/components/providers";
 import { t } from "@/lib/i18n";
 import { service, district, LIFE_EVENTS } from "@/lib/reference";
 import { StatusBadge, ChannelBadge, SectionHead } from "@/components/ui";
 import { daysBetween } from "@/lib/labels";
-import type { Application, CitizenProfile, EligibilityHit, Notification } from "@/lib/types";
-import { Sparkles, ArrowRight, ShieldCheck, IdCard, MapPin, Bell } from "lucide-react";
+import { VoiceButton } from "@/components/voice-button";
+import { Journey } from "@/components/journey";
+import { LandNavigator } from "@/components/land-navigator";
+import type { Application, CitizenProfile, EligibilityHit, Notification, AiIntentResult } from "@/lib/types";
+import { Sparkles, ArrowRight, ShieldCheck, IdCard, MapPin, Bell, Send } from "lucide-react";
+
+const EXAMPLES_EN = ["I am starting a small shop", "I need a certificate", "I had a child", "I want to transfer land", "My application is delayed"];
+const EXAMPLES_HI = ["मुझे दुकान शुरू करनी है", "मुझे प्रमाण पत्र चाहिए", "मेरे घर बच्चा हुआ", "जमीन नाम कराना है", "मेरा आवेदन विलंबित है"];
 
 interface Data {
   citizen: CitizenProfile;
@@ -19,18 +26,88 @@ interface Data {
 
 export default function CitizenDashboard() {
   const { lang } = useApp();
+  const router = useRouter();
   const [data, setData] = useState<Data | null>(null);
+  const [q, setQ] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [result, setResult] = useState<AiIntentResult | null>(null);
 
   useEffect(() => {
     fetch("/api/citizen?id=demo").then((r) => r.json()).then(setData);
   }, []);
 
+  const ask = async (text: string) => {
+    const query = text.trim();
+    if (!query) return;
+    setAsking(true);
+    setQ(query);
+    try {
+      const r = await fetch("/api/chat", { method: "POST", body: JSON.stringify({ message: query, citizenId: "demo" }) });
+      const d: AiIntentResult = await r.json();
+      if (d.kind === "disaster") { router.push("/disaster"); return; }
+      setResult(d);
+    } finally {
+      setAsking(false);
+    }
+  };
+
   if (!data) return <div className="py-20 text-center text-muted">Loading…</div>;
   const { citizen, eligibility, applications, notifications } = data;
   const d = district(citizen.districtId);
+  const examples = lang === "en" ? EXAMPLES_EN : EXAMPLES_HI;
 
   return (
     <div className="space-y-8">
+      {/* Ask Sewa Setu — the Government Journey Engine */}
+      <section className="card grid-bg relative overflow-hidden p-6 text-center sm:p-8" style={{ background: "linear-gradient(135deg,var(--brand-ink),var(--brand))" }}>
+        <div className="relative z-10 mx-auto max-w-2xl text-white">
+          <h1 className="text-[22px] font-extrabold leading-tight sm:text-[28px]">{t("askTitle", lang)}</h1>
+          <p className="mt-1 text-[13px] text-white/85">{t("askSub", lang)}</p>
+          <div className="mx-auto mt-5 flex max-w-xl items-center gap-2 rounded-2xl bg-white p-2 shadow-xl">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && ask(q)}
+              placeholder={t("askPlaceholder", lang)}
+              className="flex-1 bg-transparent px-3 py-2.5 text-[14px] text-text outline-none"
+            />
+            <VoiceButton onResult={(txt) => ask(txt)} />
+            <button onClick={() => ask(q)} className="flex items-center gap-1.5 rounded-xl bg-brand px-4 py-2.5 text-[13px] font-bold text-white">
+              {asking ? "…" : <>{t("askGo", lang)} <Send size={14} /></>}
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+            {examples.map((ex) => (
+              <button key={ex} onClick={() => ask(ex)} className="chip bg-white/15 text-white hover:bg-white/25">{ex}</button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {result && (
+        <section className="mx-auto max-w-3xl space-y-3">
+          <div className="text-[12px] font-semibold uppercase tracking-wide text-muted">
+            Intent: <span className="text-brand-ink">{result.intent}</span> · confidence {(result.confidence * 100).toFixed(0)}%
+          </div>
+          <div className="card p-4 text-[13px]">{lang === "en" ? result.reply_en : result.reply_hi}</div>
+          {result.kind === "land" && <LandNavigator />}
+          {result.kind === "lifeEvent" && result.journey && <Journey journey={result.journey} />}
+          {result.kind === "services" && result.serviceIds && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {result.serviceIds.map((id) => {
+                const s = service(id);
+                return (
+                  <Link key={id} href={`/apply/${id}`} className="card flex items-center justify-between p-3.5 text-[13px] hover:bg-surface-2">
+                    <span className="font-semibold">{lang === "en" ? s.name_en : s.name_hi}</span>
+                    <ArrowRight size={14} className="text-brand" />
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Profile / data locker */}
       <section className="card animate-in flex flex-wrap items-center gap-4 p-5">
         <div className="grid h-14 w-14 place-items-center rounded-2xl bg-brand-soft text-xl font-bold text-brand">

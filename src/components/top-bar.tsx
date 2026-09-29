@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useApp } from "./providers";
 import { GT_LANGUAGES } from "./google-translate";
 import { t } from "@/lib/i18n";
 import type { Lang } from "@/lib/types";
-import { Landmark, HandHelping, BarChart3, User, Sun, Moon, Languages, ChevronDown, TriangleAlert } from "lucide-react";
+import { Landmark, HandHelping, BarChart3, User, Sun, Moon, Languages, ChevronDown, TriangleAlert, LogOut } from "lucide-react";
 
 const MANUAL: { code: Lang; label: string }[] = [
   { code: "en", label: "English" },
@@ -18,8 +18,17 @@ const MANUAL: { code: Lang; label: string }[] = [
 export function TopBar() {
   const { lang, setLang, assisted, setAssisted, theme, toggleTheme, translateLang, setTranslateLang } = useApp();
   const path = usePathname();
+  const router = useRouter();
   const isOfficer = path.startsWith("/mis");
   const [langOpen, setLangOpen] = useState(false);
+
+  // The login/landing page renders its own official-look-alike header.
+  if (path === "/") return null;
+
+  const logout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/");
+  };
 
   const currentLabel =
     translateLang !== "en"
@@ -135,6 +144,10 @@ export function TopBar() {
             >
               <TriangleAlert size={16} />
             </Link>
+
+            <button onClick={logout} title="Log out" className="grid h-9 w-9 place-items-center rounded-xl border text-muted">
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
 

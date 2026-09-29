@@ -6,13 +6,14 @@ import { Providers } from "@/components/providers";
 import { TopBar } from "@/components/top-bar";
 import { Sahaayak } from "@/components/sahaayak";
 import { GoogleTranslate } from "@/components/google-translate";
+import { AppShell } from "@/components/app-shell";
 
 const geist = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const deva = Noto_Sans_Devanagari({ variable: "--font-deva-src", subsets: ["devanagari"], weight: ["400", "500", "600", "700"] });
 
 export const metadata: Metadata = {
-  title: "SewaSetu Sahaayak — Chhattisgarh",
-  description: "Proactive, assisted, last-mile digital governance for Chhattisgarh. Hackathon prototype.",
+  title: "Sewa Setu Next — Chhattisgarh",
+  description: "AI-powered government service orchestration and governance intelligence layer for Chhattisgarh Sewa Setu. Hackathon prototype.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -22,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Providers>
           <GoogleTranslate />
           <TopBar />
-          <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-5">{children}</main>
+          <AppShell>{children}</AppShell>
           <Sahaayak />
         </Providers>
       </body>
