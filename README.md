@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SewaSetu Sahaayak — Chhattisgarh
 
-## Getting Started
+**A next-generation _proactive layer_ on top of Chhattisgarh's Seva Setu** — hackathon prototype for Problem Statement 2 (Next-Generation Digital Governance).
 
-First, run the development server:
+Seva Setu already does single-window, WhatsApp, Bhashini and Aadhaar/DigiLocker well (441 services, 3.2 cr+ transactions, backed by the **Lok Seva Guarantee Act, 2011**). This prototype adds the layer it doesn't yet have: services that **find the citizen**, work in **their language and offline**, **auto-verify across departments**, and give officers a **live, actionable MIS** — keeping citizen simplicity and government operability at the centre.
+
+> ⚠️ Prototype / concept demo. Not affiliated with the Government of Chhattisgarh. Data is synthetic and seeded locally.
+
+## How it maps to the problem statement
+
+| Focus area | Where it lives |
+|---|---|
+| Proactive & personalized services | Eligibility engine → `/citizen` "Recommended for you" (`src/lib/eligibility.ts`) |
+| Unified experience & simplified journeys | Life-event bundles + write-once profile (`/services?event=…`) |
+| Mobile-first, assisted, inclusive | Responsive UI, EN/HI/**Chhattisgarhi** toggle, **voice input**, **Assisted Mode** (operator + consent) |
+| Smart workflow, tracking, communication | Status timeline + **Lok Seva Guarantee SLA countdown** (`/track/[id]`) + WhatsApp/SMS feed |
+| Data-driven governance & MIS | Collector dashboard + **"where to send a camp"** alerts (`/mis`) |
+| Departmental interoperability & emerging tech | Auto-verify from Aadhaar / Bhuiyan / PFMS / e-Shram (`/api/verify`) + AI Sahaayak assistant |
+
+## Tech stack
+
+- **Next.js 16** (App Router) + **React 19** + **TypeScript**
+- **Tailwind CSS v4** for styling, **Recharts** for the MIS
+- **better-sqlite3** — seeded SQLite database (`src/lib/db.ts`), no external services
+- Web Speech API for voice; rule-based AI assistant (pluggable to an LLM + Bhashini)
+
+## Run it
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The SQLite DB is created and seeded on first request (`data/sewasetu.db`) with 16 districts, 16 services, and ~220 applications spread over 90 days. Delete `data/` to re-seed.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Suggested demo storyline (≈4 min)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Landing** → the six focus areas map to real screens.
+2. **Citizen** → "Sukhmati Kashyap" (elderly, tribal, BPL, Bastar) sees **6 benefits she never claimed** — proactive discovery.
+3. Switch language to **छत्तीसगढ़ी**, use the **mic** to search, open **AI Sahaayak** and type _"my father passed away"_ → it bundles the **Bereavement** life-event.
+4. **Apply** for Old Age Pension → watch **departmental interoperability** auto-verify Aadhaar + PFMS, **4 uploads skipped** → submit.
+5. **Track** → SLA countdown under the Lok Seva Guarantee; hit _Advance workflow_ to move it live.
+6. Toggle **Assisted Mode** → re-apply as a CHOICE operator with a **consent trail** (the last-mile story).
+7. **Officer / MIS** → KPIs, **19% breach rate**, breach-by-district (LWE districts in red), channel mix (assisted+voice = last-mile), and **auto-generated camp recommendations** for Sukma/Bastar. Clear the **triage queue** one click at a time.
 
-## Learn More
+## Project structure
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+src/
+  app/
+    page.tsx              landing / focus-area map
+    citizen/              proactive dashboard
+    services/             catalogue + life-event bundles + voice search
+    apply/[id]/           auto-verify → submit wizard
+    track/[id]/           SLA timeline
+    mis/                  officer + Collector MIS
+    api/                  citizen, applications, verify, mis, chat
+  lib/
+    reference.ts          districts, departments, services, life events
+    eligibility.ts        proactive rules engine
+    db.ts                 SQLite schema, seed, MIS aggregation
+    i18n.ts / labels.ts   EN / HI / CG strings
+  components/             top-bar, sahaayak, voice-button, ui primitives
+```
