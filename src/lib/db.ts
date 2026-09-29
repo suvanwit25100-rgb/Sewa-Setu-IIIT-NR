@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
-import type { Application, AppStatus, Channel, CitizenProfile, Notification } from "./types";
-import { SERVICES, DISTRICTS, service, district } from "./reference";
+import type { Application, AppStatus, Channel, CitizenProfile, Notification, CitizenDocument, DocType, Grievance } from "./types";
+import { SERVICES, DEPARTMENTS, DISTRICTS, service, dept } from "./reference";
+import { extractDocument, delayRisk, slaRisk } from "./ai";
 
 // ---------------------------------------------------------------------------
 // Connection (singleton across hot reloads)
@@ -48,6 +49,18 @@ function migrate(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY, applicationId TEXT, citizenId TEXT, channel TEXT,
       message_en TEXT, message_hi TEXT, createdAt TEXT, read INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS documents (
+      id TEXT PRIMARY KEY, citizenId TEXT, type TEXT, label_en TEXT, fileName TEXT,
+      fields TEXT, uploadedAt TEXT, verified INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS grievances (
+      id TEXT PRIMARY KEY, applicationId TEXT, citizenId TEXT, serviceName TEXT,
+      departmentId TEXT, submittedAt TEXT, slaDays INTEGER, delayDays INTEGER,
+      description TEXT, status TEXT, createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS access_log (
+      id TEXT PRIMARY KEY, citizenId TEXT, departmentId TEXT, field TEXT, accessedAt TEXT
     );
   `);
 }
@@ -163,6 +176,35 @@ function seed(db: Database.Database) {
     { id: "N2", applicationId: "", citizenId: "demo", channel: "sms", message_en: "Old Age Pension: documents auto-verified, in review.", message_hi: "वृद्धावस्था पेंशन: दस्तावेज़ सत्यापित, समीक्षा में।", createdAt: new Date(now - 5 * 864e5).toISOString(), read: 1 },
   ];
   for (const nt of notes) insNote.run(nt as unknown as Record<string, unknown>);
+
+  // Document vault seed for the demo citizen (Feature 4).
+  const insDoc = db.prepare(`INSERT INTO documents VALUES (@id,@citizenId,@type,@label_en,@fileName,@fields,@uploadedAt,@verified)`);
+  const seedDocs: [DocType, string, number][] = [
+    ["aadhaar", "aadhaar_card.jpg", 60],
+    ["ration_card", "ration_card_scan.pdf", 55],
+    ["land_record", "b1_khasra_copy.pdf", 40],
+  ];
+  let dn = 0;
+  for (const [type, fileName, ageDays] of seedDocs) {
+    const ext = extractDocument(fileName);
+    insDoc.run({
+      id: `D${(100 + dn++).toString()}`, citizenId: "demo", type, label_en: ext.label_en, fileName,
+      fields: JSON.stringify(ext.fields), uploadedAt: new Date(now - ageDays * 864e5).toISOString(), verified: 1,
+    });
+  }
+
+  // Access log seed — Privacy / Trust dashboard (Feature 18).
+  const insAccess = db.prepare(`INSERT INTO access_log VALUES (@id,@citizenId,@departmentId,@field,@accessedAt)`);
+  const accesses: [string, string, number][] = [
+    ["social", "Age, bank account (DBT eligibility check)", 3],
+    ["revenue", "Caste certificate record", 12],
+    ["food", "Household member count (ration card)", 20],
+    ["panchayat", "Gram Sabha forest claim register", 33],
+  ];
+  let an = 0;
+  for (const [d2, field, ageDays] of accesses) {
+    insAccess.run({ id: `AC${(1 + an++).toString()}`, citizenId: "demo", departmentId: d2, field, accessedAt: new Date(now - ageDays * 864e5).toISOString() });
+  }
 }
 
 function weightedService(rnd: () => number) {
@@ -267,6 +309,57 @@ export function listNotifications(citizenId: string): Notification[] {
 }
 
 // ---------------------------------------------------------------------------
+// Documents (Feature 4 — Document Intelligence)
+// ---------------------------------------------------------------------------
+export function listDocuments(citizenId: string): CitizenDocument[] {
+  const rows = getDb().prepare("SELECT * FROM documents WHERE citizenId = ? ORDER BY uploadedAt DESC").all(citizenId) as (Omit<CitizenDocument, "fields"> & { fields: string })[];
+  return rows.map((r) => ({ ...r, fields: JSON.parse(r.fields) }));
+}
+
+export function createDocument(citizenId: string, fileName: string): CitizenDocument {
+  const ext = extractDocument(fileName);
+  const doc: CitizenDocument = {
+    id: `D${Date.now().toString().slice(-7)}`, citizenId, type: ext.type, label_en: ext.label_en,
+    fileName, fields: ext.fields, uploadedAt: new Date().toISOString(), verified: 1,
+  };
+  getDb().prepare(`INSERT INTO documents VALUES (@id,@citizenId,@type,@label_en,@fileName,@fields,@uploadedAt,@verified)`)
+    .run({ ...doc, fields: JSON.stringify(doc.fields) });
+  return doc;
+}
+
+// ---------------------------------------------------------------------------
+// Grievances (Feature 17 — Smart Grievance / Escalation)
+// ---------------------------------------------------------------------------
+export function listGrievances(citizenId?: string): Grievance[] {
+  const db = getDb();
+  return (citizenId
+    ? db.prepare("SELECT * FROM grievances WHERE citizenId = ? ORDER BY createdAt DESC").all(citizenId)
+    : db.prepare("SELECT * FROM grievances ORDER BY createdAt DESC").all()) as Grievance[];
+}
+
+export function createGrievance(applicationId: string, description: string): Grievance | null {
+  const app = getApplication(applicationId);
+  if (!app) return null;
+  const svc = service(app.serviceId);
+  const delayDays = Math.max(0, Math.ceil((Date.now() - new Date(app.dueAt).getTime()) / 864e5));
+  const g: Grievance = {
+    id: `G${Date.now().toString().slice(-6)}`, applicationId, citizenId: app.citizenId,
+    serviceName: svc.name_en, departmentId: svc.departmentId, submittedAt: app.submittedAt,
+    slaDays: app.slaDays, delayDays, description, status: "open", createdAt: new Date().toISOString(),
+  };
+  getDb().prepare(`INSERT INTO grievances VALUES (@id,@applicationId,@citizenId,@serviceName,@departmentId,@submittedAt,@slaDays,@delayDays,@description,@status,@createdAt)`).run(g as unknown as Record<string, unknown>);
+  return g;
+}
+
+// ---------------------------------------------------------------------------
+// Access log (Feature 18 — Privacy / Trust dashboard)
+// ---------------------------------------------------------------------------
+export interface AccessEntry { id: string; departmentId: string; field: string; accessedAt: string }
+export function listAccessLog(citizenId: string): AccessEntry[] {
+  return getDb().prepare("SELECT id, departmentId, field, accessedAt FROM access_log WHERE citizenId = ? ORDER BY accessedAt DESC").all(citizenId) as AccessEntry[];
+}
+
+// ---------------------------------------------------------------------------
 // MIS aggregation (data-driven governance)
 // ---------------------------------------------------------------------------
 export interface MisData {
@@ -340,5 +433,104 @@ export function computeMis(): MisData {
     byService,
     trend,
     campAlerts,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Governance Intelligence (Features 11–13) — bottleneck + root cause
+// ---------------------------------------------------------------------------
+export interface GovernanceData {
+  today: { submitted: number; completed: number; pending: number; delayed: number; atRisk: number };
+  pipeline: { stage: string; count: number }[];
+  bottleneck: { stage: string; pctOfDelayed: number };
+  rootCause: { reason: string; pct: number }[];
+  insight_en: string;
+  insight_hi: string;
+  byDepartment: { id: string; name: string; total: number; breached: number; breachRate: number }[];
+  heatmap: { district: string; region: string; department: string; service: string; applications: number; avgDays: number; slaViolationPct: number }[];
+}
+
+export function computeGovernance(): GovernanceData {
+  const apps = listApplications();
+  const now = Date.now();
+  const todayKey = new Date().toISOString().slice(0, 10);
+
+  const isPending = (a: Application) => !["delivered", "approved", "rejected"].includes(a.status);
+  const isBreached = (a: Application) => isPending(a) && new Date(a.dueAt).getTime() < now;
+  const isAtRisk = (a: Application) => isPending(a) && !isBreached(a) && slaRisk(a).risk === "high";
+
+  const today = {
+    submitted: apps.filter((a) => a.submittedAt.slice(0, 10) === todayKey).length,
+    completed: apps.filter((a) => a.status === "delivered" || a.status === "approved").length,
+    pending: apps.filter(isPending).length,
+    delayed: apps.filter(isBreached).length,
+    atRisk: apps.filter(isAtRisk).length,
+  };
+
+  // Pipeline funnel: how many applications have PASSED each stage.
+  const passedDocVerification = apps.filter((a) => a.status !== "submitted").length;
+  const passedDeptReview = apps.filter((a) => ["approved", "delivered"].includes(a.status)).length;
+  const approved = apps.filter((a) => ["approved", "delivered"].includes(a.status)).length;
+  const pipeline = [
+    { stage: "Submitted", count: apps.length },
+    { stage: "Document Verification", count: passedDocVerification },
+    { stage: "Department Review", count: passedDeptReview },
+    { stage: "Approval", count: approved },
+  ];
+  let maxDrop = { stage: "Document Verification", pct: 0 };
+  for (let i = 1; i < pipeline.length; i++) {
+    const prev = pipeline[i - 1].count || 1;
+    const dropPct = Math.round(((prev - pipeline[i].count) / prev) * 100);
+    if (dropPct > maxDrop.pct) maxDrop = { stage: pipeline[i].stage, pct: dropPct };
+  }
+
+  // Root cause analysis over delayed + at-risk applications.
+  const troubled = apps.filter((a) => isBreached(a) || isAtRisk(a));
+  let missingDocs = 0, docVerification = 0, officerApproval = 0, other = 0;
+  for (const a of troubled) {
+    if (!a.autoVerified) missingDocs++;
+    else if (a.status === "auto_verifying") docVerification++;
+    else if (a.status === "in_review") officerApproval++;
+    else other++;
+  }
+  const totalTroubled = Math.max(1, troubled.length);
+  const rootCause = [
+    { reason: "Document verification", pct: Math.round((docVerification / totalTroubled) * 100) },
+    { reason: "Officer approval", pct: Math.round((officerApproval / totalTroubled) * 100) },
+    { reason: "Missing documents", pct: Math.round((missingDocs / totalTroubled) * 100) },
+    { reason: "Other", pct: Math.round((other / totalTroubled) * 100) },
+  ].sort((a, b) => b.pct - a.pct);
+
+  const top = rootCause[0];
+  const insight_en = `${top.reason} is currently the largest contributor to processing delays (${top.pct}% of ${troubled.length} at-risk/delayed applications). Consider workload redistribution or additional verification capacity.`;
+  const insight_hi = `${top.reason} वर्तमान में देरी का सबसे बड़ा कारण है (${troubled.length} जोखिम/विलंबित आवेदनों में से ${top.pct}%)। कार्यभार पुनर्वितरण या अतिरिक्त सत्यापन क्षमता पर विचार करें।`;
+
+  const byDepartment = DEPARTMENTS.map((d) => {
+    const svcIds = new Set(SERVICES.filter((s) => s.departmentId === d.id).map((s) => s.id));
+    const da = apps.filter((a) => svcIds.has(a.serviceId));
+    const b = da.filter(isBreached).length;
+    return { id: d.id, name: d.name_en, total: da.length, breached: b, breachRate: da.length ? Math.round((b / da.length) * 100) : 0 };
+  }).sort((a, b) => b.total - a.total);
+
+  // Heatmap grid: district x top service, with mock avg-processing-days.
+  const heatmap = DISTRICTS.flatMap((d) => {
+    const da = apps.filter((a) => a.districtId === d.id);
+    const bySvc = new Map<string, Application[]>();
+    for (const a of da) bySvc.set(a.serviceId, [...(bySvc.get(a.serviceId) ?? []), a]);
+    return [...bySvc.entries()].slice(0, 2).map(([sid, list]) => {
+      const svc = service(sid);
+      const avgDays = list.reduce((sum, a) => sum + (Date.now() - new Date(a.submittedAt).getTime()) / 864e5, 0) / list.length;
+      const viol = list.filter(isBreached).length;
+      return {
+        district: d.name_en, region: d.region, department: dept(svc.departmentId).name_en, service: svc.name_en,
+        applications: list.length, avgDays: Math.round(avgDays * 10) / 10,
+        slaViolationPct: list.length ? Math.round((viol / list.length) * 100) : 0,
+      };
+    });
+  });
+
+  return {
+    today, pipeline, bottleneck: { stage: maxDrop.stage, pctOfDelayed: maxDrop.pct },
+    rootCause, insight_en, insight_hi, byDepartment, heatmap,
   };
 }

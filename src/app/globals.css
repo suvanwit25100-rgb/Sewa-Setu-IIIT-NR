@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* SewaSetu Sahaayak — govtech light theme ------------------------------- */
+/* SewaSetu Next — govtech theme (light + dark) ---------------------------- */
 :root {
   color-scheme: light;
   --bg: #eef1f7;
@@ -20,6 +20,31 @@
   --red-soft: #fdeaea;
   --amber: #d97706;
   --amber-soft: #fef3e0;
+  --purple: #7c3aed;
+  --purple-soft: #f1e9fe;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --surface: #121a2b;
+  --surface-2: #182338;
+  --border: #263248;
+  --text: #e8edf7;
+  --muted: #93a0b8;
+  --brand: #5b8def;
+  --brand-ink: #a9c4ff;
+  --brand-soft: #1b2a4d;
+  --saffron: #f59a35;
+  --saffron-soft: #3a2810;
+  --green: #34c281;
+  --green-soft: #12301f;
+  --red: #f16565;
+  --red-soft: #3a1616;
+  --amber: #f2b23d;
+  --amber-soft: #3a2b0c;
+  --purple: #a78bfa;
+  --purple-soft: #251b40;
 }
 
 @theme inline {
@@ -41,18 +66,23 @@
 
 * { border-color: var(--border); }
 
+html { background: var(--bg); }
+
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  transition: background-color .15s ease, color .15s ease;
 }
 
 .lang-hi, .lang-cg { font-family: var(--font-deva); }
 
-/* Tricolour hairline used on the top bar */
 .tricolour {
   background: linear-gradient(90deg, var(--saffron) 0 33%, #ffffff 33% 66%, var(--green) 66% 100%);
+}
+:root[data-theme="dark"] .tricolour {
+  background: linear-gradient(90deg, var(--saffron) 0 33%, #cfd8ea 33% 66%, var(--green) 66% 100%);
 }
 
 .card {
@@ -77,3 +107,12 @@ body {
   background-image: radial-gradient(circle at 1px 1px, #ffffff22 1px, transparent 0);
   background-size: 22px 22px;
 }
+
+/* ---------------------------------------------------------------------- */
+/* Google Translate — custom-driven, default widget UI fully hidden       */
+/* ---------------------------------------------------------------------- */
+#google_translate_element { display: none !important; }
+.goog-te-banner-frame, .skiptranslate iframe { display: none !important; visibility: hidden !important; height: 0 !important; }
+body { top: 0 !important; }
+.goog-tooltip, .goog-tooltip:hover { display: none !important; }
+.goog-text-highlight { background: none !important; box-shadow: none !important; }

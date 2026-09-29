@@ -1,4 +1,4 @@
-import type { District, Department, ServiceDef, LifeEvent } from "./types";
+import type { District, Department, ServiceDef, LifeEvent, DocType } from "./types";
 
 // A representative set of Chhattisgarh districts, tagged by region so the MIS
 // can highlight tribal / LWE-affected blocks where last-mile uptake lags.
@@ -144,7 +144,71 @@ export const SERVICES: ServiceDef[] = [
     autoVerify: [{ source: "Aadhaar e-KYC", field: "Both identities & age" }],
     eligibilityRules: [], lifeEvents: ["marriage"], popularity: 42,
   },
+  {
+    id: "land_mutation", code: "REV-MUT", name_en: "Land Mutation (Naamantaran)", name_hi: "भूमि नामांतरण", name_cg: "जमीन नामांतरण",
+    departmentId: "revenue", category: "land", slaDays: 45, fee: 50,
+    requiredDocs: ["Aadhaar", "Registered deed / legal heir certificate", "Land record (B-1/RoR)", "Death certificate (if inherited)"],
+    autoVerify: [{ source: "Bhuiyan (Land records)", field: "Current khasra / owner" }, { source: "Registrar", field: "Deed registration" }],
+    eligibilityRules: [], lifeEvents: [], popularity: 38,
+  },
+  {
+    id: "legal_heir_cert", code: "REV-LHC", name_en: "Legal Heir Certificate", name_hi: "वारिस प्रमाण पत्र", name_cg: "वारिस परमान पत्तर",
+    departmentId: "revenue", category: "certificate", slaDays: 30, fee: 30,
+    requiredDocs: ["Aadhaar", "Death certificate of owner", "Family tree declaration"],
+    autoVerify: [{ source: "Health MIS", field: "Death record" }, { source: "Revenue records", field: "Family register" }],
+    eligibilityRules: [], lifeEvents: ["bereavement"], popularity: 28,
+  },
+  {
+    id: "disaster_relief", code: "REV-DIS", name_en: "Disaster Relief Assistance", name_hi: "आपदा राहत सहायता", name_cg: "आपदा राहत मदद",
+    departmentId: "revenue", category: "welfare", slaDays: 10, fee: 0,
+    requiredDocs: ["Aadhaar", "Residence proof", "Damage photos"],
+    autoVerify: [{ source: "Revenue records", field: "Residence in affected area" }],
+    eligibilityRules: [], lifeEvents: ["disaster"], popularity: 20,
+  },
+  {
+    id: "lost_document_assist", code: "REV-LDA", name_en: "Lost Document Re-issue", name_hi: "खोया दस्तावेज़ पुनः जारी", name_cg: "खोवाइस कागज फेर जारी",
+    departmentId: "revenue", category: "certificate", slaDays: 15, fee: 20,
+    requiredDocs: ["Aadhaar", "Police / disaster loss report"],
+    autoVerify: [{ source: "Revenue records", field: "Prior certificate on file" }],
+    eligibilityRules: [], lifeEvents: ["disaster"], popularity: 15,
+  },
 ];
+
+// Document Intelligence — types citizens commonly hold, and how each maps
+// onto the vault + reuse graph (Feature 4).
+export const DOC_TYPE_LABEL: Record<DocType, { en: string; hi: string }> = {
+  income_certificate: { en: "Income Certificate", hi: "आय प्रमाण पत्र" },
+  caste_certificate: { en: "Caste Certificate", hi: "जाति प्रमाण पत्र" },
+  domicile_certificate: { en: "Domicile Certificate", hi: "मूल निवास प्रमाण पत्र" },
+  aadhaar: { en: "Aadhaar Card", hi: "आधार कार्ड" },
+  ration_card: { en: "Ration Card", hi: "राशन कार्ड" },
+  land_record: { en: "Land Record (B-1/RoR)", hi: "भू-अभिलेख" },
+  bank_passbook: { en: "Bank Passbook", hi: "बैंक पासबुक" },
+  marksheet: { en: "Marksheet", hi: "अंकसूची" },
+  disability_certificate: { en: "Disability (UDID) Certificate", hi: "दिव्यांगता प्रमाण पत्र" },
+  death_certificate: { en: "Death Certificate", hi: "मृत्यु प्रमाण पत्र" },
+};
+
+// Maps a document type to the substring it satisfies inside a service's
+// requiredDocs list — powers "this document can be reused for N services".
+const DOC_MATCH_HINT: Record<string, string> = {
+  income_certificate: "income",
+  caste_certificate: "caste",
+  domicile_certificate: "domicile",
+  aadhaar: "aadhaar",
+  ration_card: "ration",
+  land_record: "land record",
+  bank_passbook: "bank passbook",
+  marksheet: "marksheet",
+  disability_certificate: "udid",
+  death_certificate: "death certificate",
+};
+
+export function servicesReusingDoc(docType: string): ServiceDef[] {
+  const hint = DOC_MATCH_HINT[docType];
+  if (!hint) return [];
+  return SERVICES.filter((s) => s.requiredDocs.some((d) => d.toLowerCase().includes(hint)));
+}
 
 export const LIFE_EVENTS: LifeEvent[] = [
   {
@@ -177,6 +241,47 @@ export const LIFE_EVENTS: LifeEvent[] = [
     desc_hi: "विवाह पंजीकरण और घरेलू रिकॉर्ड अद्यतन।",
     serviceIds: ["marriage_reg", "ration_card"],
   },
+  {
+    id: "land_transfer", emoji: "🏞️", name_en: "Transfer Family Land", name_hi: "पैतृक भूमि हस्तांतरण",
+    desc_en: "Move land records into your name after inheritance or a deed.",
+    desc_hi: "विरासत या दस्तावेज़ के बाद भूमि अपने नाम कराएँ।",
+    serviceIds: ["legal_heir_cert", "land_mutation", "land_ror"],
+  },
+  {
+    id: "disaster", emoji: "🌊", name_en: "Disaster / Damage", name_hi: "आपदा / क्षति",
+    desc_en: "Report damage and claim relief assistance.",
+    desc_hi: "क्षति की रिपोर्ट करें और राहत सहायता पाएँ।",
+    serviceIds: ["disaster_relief", "lost_document_assist"],
+  },
+];
+
+// Land / Revenue Service Navigator — guided question sequence (Feature 20).
+export interface GuidedQuestion {
+  id: string;
+  q_en: string;
+  q_hi: string;
+  options?: { value: string; label_en: string; label_hi: string }[];
+}
+
+export const LAND_TRANSFER_QUESTIONS: GuidedQuestion[] = [
+  { id: "owner", q_en: "Who is the current registered owner of the land?", q_hi: "भूमि के वर्तमान पंजीकृत मालिक कौन हैं?" },
+  {
+    id: "relationship", q_en: "What is your relationship to the owner?", q_hi: "मालिक से आपका क्या संबंध है?",
+    options: [
+      { value: "child", label_en: "Son / Daughter", label_hi: "पुत्र / पुत्री" },
+      { value: "spouse", label_en: "Spouse", label_hi: "पति / पत्नी" },
+      { value: "other", label_en: "Other heir", label_hi: "अन्य वारिस" },
+    ],
+  },
+  {
+    id: "deed", q_en: "Is there a registered deed or will?", q_hi: "क्या कोई पंजीकृत दस्तावेज़ या वसीयत है?",
+    options: [
+      { value: "yes", label_en: "Yes, registered deed", label_hi: "हाँ, पंजीकृत दस्तावेज़" },
+      { value: "no", label_en: "No — inheritance only", label_hi: "नहीं — केवल विरासत से" },
+    ],
+  },
+  { id: "district", q_en: "Which district is the land in?", q_hi: "भूमि किस जिले में है?" },
+  { id: "tehsil", q_en: "Which tehsil / patwari circle?", q_hi: "कौन सा तहसील / पटवारी हलका?" },
 ];
 
 export const dept = (id: string) => DEPARTMENTS.find((d) => d.id === id)!;

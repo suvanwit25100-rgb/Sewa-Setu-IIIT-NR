@@ -5,6 +5,7 @@ import "./globals.css";
 import { Providers } from "@/components/providers";
 import { TopBar } from "@/components/top-bar";
 import { Sahaayak } from "@/components/sahaayak";
+import { GoogleTranslate } from "@/components/google-translate";
 
 const geist = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const deva = Noto_Sans_Devanagari({ variable: "--font-deva-src", subsets: ["devanagari"], weight: ["400", "500", "600", "700"] });
@@ -19,6 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className={`${geist.variable} ${deva.variable}`}>
         <Providers>
+          <GoogleTranslate />
           <TopBar />
           <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-5">{children}</main>
           <Sahaayak />

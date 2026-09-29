@@ -5,14 +5,16 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useApp } from "./providers";
 import { t } from "@/lib/i18n";
-import { service, LIFE_EVENTS } from "@/lib/reference";
+import { service } from "@/lib/reference";
 import { VoiceButton } from "./voice-button";
-import { MessageCircle, X, Send, Sparkles } from "lucide-react";
+import { LandNavigator } from "./land-navigator";
+import type { AiIntentResult } from "@/lib/types";
+import { MessageCircle, X, Send, Sparkles, ArrowRight } from "lucide-react";
 
-interface Msg { role: "user" | "bot"; text: string; serviceIds?: string[]; lifeEventId?: string }
+interface Msg { role: "user" | "bot"; text?: string; result?: AiIntentResult }
 
-const SUGGESTIONS_EN = ["My father passed away", "I want to start a shop", "I need an income certificate", "Scholarship for my son"];
-const SUGGESTIONS_HI = ["पिता का निधन हो गया", "दुकान शुरू करनी है", "आय प्रमाण पत्र चाहिए", "बेटे के लिए छात्रवृत्ति"];
+const SUGGESTIONS_EN = ["My father passed away", "I want to start a shop", "I need an income certificate", "Transfer my father's land"];
+const SUGGESTIONS_HI = ["पिता का निधन हो गया", "दुकान शुरू करनी है", "आय प्रमाण पत्र चाहिए", "पिताजी की जमीन नाम करनी है"];
 
 export function Sahaayak() {
   const { lang } = useApp();
@@ -22,8 +24,7 @@ export function Sahaayak() {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
 
-  // Hide on officer/MIS surfaces — this assistant is citizen-facing.
-  if (path.startsWith("/mis") || path.startsWith("/officer")) return null;
+  if (path.startsWith("/mis")) return null;
 
   const send = async (text: string) => {
     const q = text.trim();
@@ -32,9 +33,9 @@ export function Sahaayak() {
     setInput("");
     setBusy(true);
     try {
-      const r = await fetch("/api/chat", { method: "POST", body: JSON.stringify({ message: q }) });
-      const d = await r.json();
-      setMsgs((m) => [...m, { role: "bot", text: lang === "en" ? d.reply_en : d.reply_hi, serviceIds: d.serviceIds, lifeEventId: d.lifeEventId }]);
+      const r = await fetch("/api/chat", { method: "POST", body: JSON.stringify({ message: q, citizenId: "demo" }) });
+      const d: AiIntentResult = await r.json();
+      setMsgs((m) => [...m, { role: "bot", result: d }]);
     } finally {
       setBusy(false);
     }
@@ -52,47 +53,27 @@ export function Sahaayak() {
       </button>
 
       {open && (
-        <div className="animate-in fixed bottom-20 right-5 z-50 flex h-[70vh] max-h-[560px] w-[92vw] max-w-sm flex-col overflow-hidden rounded-2xl border bg-surface shadow-2xl">
+        <div className="animate-in fixed bottom-20 right-5 z-50 flex h-[75vh] max-h-[620px] w-[92vw] max-w-sm flex-col overflow-hidden rounded-2xl border bg-surface shadow-2xl">
           <div className="flex items-center gap-2 border-b bg-brand px-4 py-3 text-white">
             <MessageCircle size={18} />
             <div className="leading-tight">
               <div className="text-[14px] font-bold">{t("askSahaayak", lang)}</div>
-              <div className="text-[11px] text-white/80">AI + Bhashini (demo)</div>
+              <div className="text-[11px] text-white/80">Government Journey Engine (demo AI)</div>
             </div>
           </div>
 
           <div className="flex-1 space-y-3 overflow-y-auto p-4">
             {msgs.length === 0 && (
               <div className="text-[13px] text-muted">
-                {lang === "en"
-                  ? "Describe your situation in plain words — I'll find the right services."
-                  : "अपनी बात सरल शब्दों में बताइए — मैं सही सेवाएँ ढूँढ दूँगा।"}
+                {lang === "en" ? "Describe your situation in plain words — I'll build your journey." : "अपनी बात सरल शब्दों में बताइए — मैं आपकी यात्रा बना दूँगा।"}
               </div>
             )}
             {msgs.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-right" : ""}>
-                <div className={`inline-block max-w-[85%] rounded-2xl px-3 py-2 text-[13px] ${m.role === "user" ? "bg-brand text-white" : "bg-surface-2"}`}>
-                  {m.text}
-                </div>
-                {m.lifeEventId && (
-                  <div className="mt-2">
-                    <Link href={`/services?event=${m.lifeEventId}`} onClick={() => setOpen(false)} className="inline-flex items-center gap-1 rounded-lg bg-saffron px-3 py-1.5 text-[12px] font-bold text-white" style={{ background: "var(--saffron)" }}>
-                      {LIFE_EVENTS.find((l) => l.id === m.lifeEventId)?.emoji} {t("startBundle", lang)}
-                    </Link>
-                  </div>
+                {m.role === "user" && (
+                  <div className="inline-block max-w-[85%] rounded-2xl bg-brand px-3 py-2 text-[13px] text-white">{m.text}</div>
                 )}
-                {m.serviceIds && m.serviceIds.length > 0 && !m.lifeEventId && (
-                  <div className="mt-2 flex flex-wrap justify-start gap-1.5">
-                    {m.serviceIds.map((id) => {
-                      const s = service(id);
-                      return (
-                        <Link key={id} href={`/apply/${id}`} onClick={() => setOpen(false)} className="chip border text-brand hover:bg-brand-soft">
-                          {lang === "en" ? s.name_en : s.name_hi} →
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
+                {m.role === "bot" && m.result && <BotReply result={m.result} lang={lang} onNavigate={() => setOpen(false)} />}
               </div>
             ))}
             {busy && <div className="text-[12px] text-muted">…</div>}
@@ -122,5 +103,51 @@ export function Sahaayak() {
         </div>
       )}
     </>
+  );
+}
+
+function BotReply({ result, lang, onNavigate }: { result: AiIntentResult; lang: "en" | "hi" | "cg"; onNavigate: () => void }) {
+  const text = lang === "en" ? result.reply_en : result.reply_hi;
+  return (
+    <div className="space-y-2 text-left">
+      <div className="inline-block max-w-[95%] rounded-2xl bg-surface-2 px-3 py-2 text-[13px]">{text}</div>
+
+      {result.kind === "disaster" && (
+        <Link href="/disaster" onClick={onNavigate} className="flex items-center gap-1.5 rounded-lg bg-red px-3 py-1.5 text-[12px] font-bold text-white" style={{ background: "var(--red)" }}>
+          Open Disaster Mode <ArrowRight size={12} />
+        </Link>
+      )}
+
+      {result.kind === "land" && (
+        <div className="max-w-[95%]"><LandNavigator compact /></div>
+      )}
+
+      {result.kind === "lifeEvent" && result.journey && (
+        <div className="max-w-[95%] space-y-1.5 rounded-xl border p-2.5">
+          <div className="text-[12px] font-bold text-brand">{lang === "en" ? result.journey.title_en : result.journey.title_hi}</div>
+          {result.journey.services.map((js) => {
+            const s = service(js.serviceId);
+            return (
+              <Link key={js.serviceId} href={`/apply/${js.serviceId}`} onClick={onNavigate} className="flex items-center justify-between rounded-lg border px-2.5 py-1.5 text-[12px] hover:bg-brand-soft">
+                {lang === "en" ? s.name_en : s.name_hi} <ArrowRight size={12} />
+              </Link>
+            );
+          })}
+        </div>
+      )}
+
+      {result.kind === "services" && result.serviceIds && result.serviceIds.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {result.serviceIds.map((id) => {
+            const s = service(id);
+            return (
+              <Link key={id} href={`/apply/${id}`} onClick={onNavigate} className="chip border text-brand hover:bg-brand-soft">
+                {lang === "en" ? s.name_en : s.name_hi} →
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

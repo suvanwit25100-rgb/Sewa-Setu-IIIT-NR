@@ -6,10 +6,10 @@ import type { Lang } from "./types";
 type Dict = Record<string, { en: string; hi: string; cg?: string }>;
 
 export const STR: Dict = {
-  appName: { en: "SewaSetu Sahaayak", hi: "सेवा सेतु सहायक", cg: "सेवा सेतु सहायक" },
+  appName: { en: "Sewa Setu Next", hi: "सेवा सेतु नेक्स्ट", cg: "सेवा सेतु नेक्स्ट" },
   tagline: {
-    en: "Chhattisgarh • proactive, assisted, last-mile governance",
-    hi: "छत्तीसगढ़ • सक्रिय, सहायता-युक्त, अंतिम-व्यक्ति तक शासन",
+    en: "Don't search for a service. Tell us what happened.",
+    hi: "सेवा मत खोजिए। बताइए क्या हुआ।",
   },
   prototype: { en: "Prototype", hi: "प्रोटोटाइप" },
   citizenPortal: { en: "Citizen", hi: "नागरिक", cg: "नागरिक" },
@@ -45,6 +45,19 @@ export const STR: Dict = {
   free: { en: "Free", hi: "नि:शुल्क", cg: "फोकट" },
   sla: { en: "Guaranteed in", hi: "गारंटी", cg: "गारंटी" },
   days: { en: "days", hi: "दिन", cg: "दिन" },
+  askTitle: { en: "How can we help you today?", hi: "आज हम आपकी कैसे मदद करें?" },
+  askSub: {
+    en: "Don't search for a government service — tell us what happened in your life.",
+    hi: "सरकारी सेवा मत खोजिए — बताइए आपकी ज़िंदगी में क्या हुआ।",
+  },
+  askPlaceholder: { en: "e.g. \"I am starting a small shop\"", hi: "जैसे \"मुझे दुकान शुरू करनी है\"" },
+  askGo: { en: "Ask Sewa Setu", hi: "सेवा सेतु से पूछें" },
+  yourJourneys: { en: "Your journeys", hi: "आपकी यात्राएँ" },
+  profile: { en: "My Profile", hi: "मेरी प्रोफ़ाइल" },
+  documents: { en: "My Documents", hi: "मेरे दस्तावेज़" },
+  grievances: { en: "Grievances", hi: "शिकायतें" },
+  privacy: { en: "Privacy / My Data", hi: "गोपनीयता / मेरा डेटा" },
+  disasterMode: { en: "Disaster Mode", hi: "आपदा मोड" },
 };
 
 export function t(key: string, lang: Lang): string {

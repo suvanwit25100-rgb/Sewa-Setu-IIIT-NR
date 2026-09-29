@@ -7,25 +7,44 @@ import { useApp } from "@/components/providers";
 import { t } from "@/lib/i18n";
 import { service } from "@/lib/reference";
 import { DeptBadge } from "@/components/ui";
-import type { Application } from "@/lib/types";
-import { Clock, ShieldCheck, Loader2, CheckCircle2, ArrowRight, Fingerprint, FileCheck2 } from "lucide-react";
+import type { Application, CitizenDocument } from "@/lib/types";
+import {
+  Clock, ShieldCheck, Loader2, CheckCircle2, ArrowRight, Fingerprint, FileCheck2,
+  ClipboardCheck, TriangleAlert, X,
+} from "lucide-react";
 
 interface Check { source: string; field: string; value: string; status: string }
+interface Health {
+  docsOk: { have: number; need: number };
+  fieldsOk: { have: number; need: number };
+  quality: boolean;
+  consistency: { ok: boolean; issue_en?: string; issue_hi?: string };
+  eligibility: boolean;
+  overallOk: boolean;
+}
+
+const STEP_LABELS = ["Start", "Auto-verify", "Health check", "Submit", "Done"];
 
 export default function ApplyPage() {
   const { lang, assisted } = useApp();
   const { id } = useParams<{ id: string }>();
   const s = service(id);
 
-  const [step, setStep] = useState<0 | 1 | 2 | 3>(0);
+  const [step, setStep] = useState<0 | 1 | 2 | 3 | 4>(0);
   const [consent, setConsent] = useState(false);
   const [checks, setChecks] = useState<Check[]>([]);
   const [revealed, setRevealed] = useState(0);
   const [app, setApp] = useState<Application | null>(null);
+  const [vault, setVault] = useState<CitizenDocument[]>([]);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [forceContinue, setForceContinue] = useState(false);
 
   const name = lang === "en" ? s.name_en : lang === "cg" ? s.name_cg : s.name_hi;
 
-  // Run auto-verification when entering step 1.
+  useEffect(() => {
+    fetch("/api/documents?citizenId=demo").then((r) => r.json()).then((d) => setVault(d.documents));
+  }, []);
+
   useEffect(() => {
     if (step !== 1) return;
     setChecks([]); setRevealed(0);
@@ -34,13 +53,19 @@ export default function ApplyPage() {
       .then((d) => setChecks(d.checks));
   }, [step, s.id]);
 
-  // Reveal checks one-by-one for effect.
   useEffect(() => {
     if (step !== 1 || checks.length === 0) return;
     if (revealed >= checks.length) return;
     const timer = setTimeout(() => setRevealed((v) => v + 1), 650);
     return () => clearTimeout(timer);
   }, [step, checks, revealed]);
+
+  useEffect(() => {
+    if (step !== 2) return;
+    fetch("/api/health-check", { method: "POST", body: JSON.stringify({ serviceId: s.id, citizenId: "demo" }) })
+      .then((r) => r.json())
+      .then(setHealth);
+  }, [step, s.id]);
 
   const submit = async () => {
     const res = await fetch("/api/applications", {
@@ -49,12 +74,16 @@ export default function ApplyPage() {
     });
     const d = await res.json();
     setApp(d.application);
-    setStep(3);
+    setStep(4);
   };
+
+  const haveTypes = new Set(vault.map((v) => v.label_en.toLowerCase()));
+  const requiredWithStatus = s.requiredDocs.map((doc) => ({
+    doc, have: [...haveTypes].some((h) => doc.toLowerCase().includes(h.split(" ")[0].toLowerCase())),
+  }));
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
-      {/* Header */}
       <div className="card p-5">
         <div className="flex items-center justify-between gap-2">
           <DeptBadge id={s.departmentId} />
@@ -70,13 +99,12 @@ export default function ApplyPage() {
         </div>
       </div>
 
-      {/* Stepper */}
       <div className="flex items-center gap-1 px-1 text-[11px] font-semibold text-muted">
-        {["Start", "Auto-verify", "Submit", "Done"].map((label, i) => (
+        {STEP_LABELS.map((label, i) => (
           <div key={label} className="flex flex-1 items-center gap-1">
             <span className={`grid h-6 w-6 place-items-center rounded-full text-[11px] ${i <= step ? "bg-brand text-white" : "bg-surface-2 text-muted"}`}>{i + 1}</span>
             <span className={i <= step ? "text-brand-ink" : ""}>{label}</span>
-            {i < 3 && <span className="mx-1 h-px flex-1" style={{ background: i < step ? "var(--brand)" : "var(--border)" }} />}
+            {i < STEP_LABELS.length - 1 && <span className="mx-1 h-px flex-1" style={{ background: i < step ? "var(--brand)" : "var(--border)" }} />}
           </div>
         ))}
       </div>
@@ -101,15 +129,25 @@ export default function ApplyPage() {
           {assisted && (
             <div className="rounded-xl border p-3" style={{ background: "var(--amber-soft)", borderColor: "transparent" }}>
               <div className="flex items-center gap-2 text-[13px] font-bold" style={{ color: "var(--amber)" }}>
-                <Fingerprint size={16} /> Citizen consent required
+                <ClipboardCheck size={16} /> Kendra Operator Copilot
               </div>
-              <p className="mt-1 text-[12px]" style={{ color: "var(--amber)" }}>
-                You (operator) are applying on the citizen&apos;s behalf. Capture their consent to proceed — recorded in an audit trail.
-              </p>
-              <label className="mt-2 flex items-center gap-2 text-[13px]">
-                <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
-                <span>Citizen consent captured (OTP / biometric) — demo</span>
-              </label>
+              <div className="mt-2 space-y-1">
+                {requiredWithStatus.map(({ doc, have }) => (
+                  <div key={doc} className="flex items-center gap-2 text-[12px]" style={{ color: "var(--amber)" }}>
+                    {have ? "✓" : "✗"} {doc} {have ? "(citizen already has)" : "(missing — collect before submission)"}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 text-[11px]" style={{ color: "var(--amber)" }}>
+                Estimated processing: {s.slaDays} days.
+              </div>
+              <div className="mt-3 flex items-center gap-2 border-t pt-2 text-[13px]" style={{ borderColor: "color-mix(in srgb, var(--amber) 30%, transparent)" }}>
+                <Fingerprint size={16} style={{ color: "var(--amber)" }} />
+                <label className="flex items-center gap-2" style={{ color: "var(--amber)" }}>
+                  <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+                  Citizen consent captured (OTP / biometric) — demo
+                </label>
+              </div>
             </div>
           )}
 
@@ -156,8 +194,47 @@ export default function ApplyPage() {
         </div>
       )}
 
-      {/* Step 2 — review */}
+      {/* Step 2 — application health check */}
       {step === 2 && (
+        <div className="card animate-in space-y-4 p-5">
+          <div className="flex items-center gap-2">
+            <ClipboardCheck size={18} className="text-brand" />
+            <h2 className="text-[15px] font-bold">Application health check</h2>
+          </div>
+          {!health ? (
+            <div className="flex items-center gap-2 text-[13px] text-muted"><Loader2 size={16} className="animate-spin" /> Checking…</div>
+          ) : (
+            <div className="animate-in space-y-2.5">
+              <HealthRow label="Documents" ok={health.docsOk.have >= health.docsOk.need} detail={`${Math.min(health.docsOk.have, health.docsOk.need)}/${health.docsOk.need}`} />
+              <HealthRow label="Required fields" ok={health.fieldsOk.have >= health.fieldsOk.need - 1} detail={`${health.fieldsOk.have}/${health.fieldsOk.need}`} />
+              <HealthRow label="Document quality" ok={health.quality} />
+              <HealthRow label="Information consistency" ok={health.consistency.ok} />
+              <HealthRow label="Eligibility" ok={health.eligibility} />
+
+              {!health.consistency.ok && (
+                <div className="flex items-start gap-2 rounded-xl p-3 text-[12px]" style={{ background: "var(--amber-soft)", color: "var(--amber)" }}>
+                  <TriangleAlert size={15} className="mt-0.5 shrink-0" />
+                  <span>{lang === "en" ? health.consistency.issue_en : health.consistency.issue_hi}</span>
+                </div>
+              )}
+
+              {(health.overallOk || forceContinue) ? (
+                <button onClick={() => setStep(3)} className="w-full rounded-xl bg-brand py-3 text-[14px] font-bold text-white">Continue to review →</button>
+              ) : (
+                <div className="flex gap-2">
+                  <Link href="/documents" className="flex-1 rounded-xl border py-3 text-center text-[13px] font-bold text-brand">Fix before submission</Link>
+                  <button onClick={() => setForceContinue(true)} className="flex flex-1 items-center justify-center gap-1 rounded-xl bg-surface-2 py-3 text-[13px] font-bold text-muted">
+                    Continue anyway <X size={13} />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Step 3 — review */}
+      {step === 3 && (
         <div className="card animate-in space-y-4 p-5">
           <h2 className="text-[15px] font-bold">Review &amp; submit</h2>
           <div className="space-y-2 rounded-xl bg-surface-2 p-3 text-[13px]">
@@ -172,8 +249,8 @@ export default function ApplyPage() {
         </div>
       )}
 
-      {/* Step 3 — success */}
-      {step === 3 && app && (
+      {/* Step 4 — success */}
+      {step === 4 && app && (
         <div className="card animate-in space-y-4 p-6 text-center">
           <CheckCircle2 size={52} className="mx-auto" style={{ color: "var(--green)" }} />
           <div>
@@ -193,6 +270,17 @@ export default function ApplyPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function HealthRow({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-surface-2 px-3 py-2 text-[13px]">
+      <span>{label}</span>
+      <span className="flex items-center gap-1.5 font-semibold" style={{ color: ok ? "var(--green)" : "var(--amber)" }}>
+        {detail && <span className="text-[11px] text-muted">{detail}</span>} {ok ? "✓" : "⚠"}
+      </span>
     </div>
   );
 }

@@ -64,12 +64,21 @@ export default function CitizenDashboard() {
             const s = service(e.serviceId);
             return (
               <div key={e.serviceId} className="card animate-in flex flex-col p-4" style={{ borderColor: "color-mix(in srgb, var(--brand) 25%, white)" }}>
-                <div className="flex items-start gap-2">
-                  <Sparkles size={16} className="mt-0.5 shrink-0 text-brand" style={{ color: "var(--saffron)" }} />
-                  <div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <Sparkles size={16} className="mt-0.5 shrink-0" style={{ color: "var(--saffron)" }} />
                     <div className="text-[14px] font-bold">{lang === "en" ? s.name_en : lang === "cg" ? s.name_cg : s.name_hi}</div>
-                    <div className="text-[12px] text-muted">{lang === "en" ? e.reason_en : e.reason_hi}</div>
                   </div>
+                  <span className="chip shrink-0" style={{ background: e.match === "high" ? "var(--green-soft)" : "var(--amber-soft)", color: e.match === "high" ? "var(--green)" : "var(--amber)" }}>
+                    Match: {e.match === "high" ? "High" : "Medium"}
+                  </span>
+                </div>
+                <div className="mt-2 space-y-1">
+                  {e.criteria.map((c, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <span style={{ color: "var(--green)" }}>✓</span> {lang === "en" ? c.label_en : c.label_hi}
+                    </div>
+                  ))}
                 </div>
                 <div className="mt-3 rounded-lg bg-green-soft px-2.5 py-1.5 text-[12px] font-semibold" style={{ background: "var(--green-soft)", color: "var(--green)" }}>
                   ✓ {lang === "en" ? e.benefit_en : e.benefit_hi}
